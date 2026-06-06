@@ -446,7 +446,7 @@ body {
 .panel-body { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 24px; }
 
 .setting-group label { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--gray); display: block; margin-bottom: 10px; }
-.voice-list { display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto; }
+.voice-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; padding-right: 4px; }
 .voice-item {
   display: flex;
   align-items: center;
@@ -490,6 +490,11 @@ input[type=range]::-webkit-slider-thumb {
   font-size: 14px;
   color: var(--teal);
 }
+
+.voice-list::-webkit-scrollbar { width: 4px; }
+.voice-list::-webkit-scrollbar-track { background: var(--light); border-radius: 2px; }
+.voice-list::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 2px; }
+.voice-list::-webkit-scrollbar-thumb:hover { background: var(--teal); }
 
 .test-btn {
   background: var(--light);
@@ -904,17 +909,31 @@ input[type=range]::-webkit-slider-thumb {
       </div>
     </div>
     <div class="setting-group">
-      <label>Tùy chọn khác</label>
+      <label>Tùy chọn đọc tự động</label>
       <div class="toggle-row" style="margin-bottom:12px;">
-        <span style="font-size:14px;font-weight:600;">Tự đọc câu hỏi khi hiển thị</span>
+        <div>
+          <span style="font-size:14px;font-weight:600;">Tự đọc câu hỏi khi hiển thị</span>
+          <div style="font-size:11px;color:var(--gray);margin-top:2px;">Đọc ngay khi vào câu mới</div>
+        </div>
         <div class="toggle on" id="toggle-autoread" onclick="toggleAutoRead(this)"></div>
       </div>
+      <div class="toggle-row" style="margin-bottom:12px;">
+        <div>
+          <span style="font-size:14px;font-weight:600;">Tự đọc các đáp án sau câu hỏi</span>
+          <div style="font-size:11px;color:var(--gray);margin-top:2px;">Đọc "Một… Hai… Ba…" liên tiếp</div>
+        </div>
+        <div class="toggle on" id="toggle-readoptsauto" onclick="toggleReadOptsAuto(this)"></div>
+      </div>
       <div class="toggle-row">
-        <span style="font-size:14px;font-weight:600;">Đọc đáp án khi chọn</span>
+        <div>
+          <span style="font-size:14px;font-weight:600;">Đọc phản hồi khi chọn đáp án</span>
+          <div style="font-size:11px;color:var(--gray);margin-top:2px;">Đọc "Đúng rồi!" hoặc đáp án đúng</div>
+        </div>
         <div class="toggle on" id="toggle-readopt" onclick="toggleReadOpt(this)"></div>
       </div>
     </div>
     <button class="test-btn" onclick="testVoice()">🔊 Nghe thử giọng đọc</button>
+    <button class="test-btn" style="margin-top:-10px;" onclick="testSequence()">📋 Nghe thử đọc câu hỏi + đáp án</button>
   </div>
 </div>
 
@@ -985,7 +1004,7 @@ const CATS = {
 
 let lessons  = JSON.parse(localStorage.getItem('mamnon_lessons_v2'))  || defaultLessons;
 let progress = JSON.parse(localStorage.getItem('mamnon_progress_v2')) || {};
-let voiceCfg = JSON.parse(localStorage.getItem('mamnon_voice_v2'))    || { idx: -1, rate: 0.9, pitch: 1.1, vol: 1, autoRead: true, readOpt: true };
+let voiceCfg = JSON.parse(localStorage.getItem('mamnon_voice_v2'))    || { idx: -1, rate: 0.9, pitch: 1.1, vol: 1, autoRead: true, readOptsAuto: true, readOpt: true };
 
 let currentLesson  = null;
 let currentQIdx    = 0;
@@ -1007,7 +1026,7 @@ function showScreen(name) {
 }
 
 function goHome() {
-  window.speechSynthesis.cancel();
+  stopSpeaking();
   showScreen('home');
 }
 
@@ -1100,9 +1119,9 @@ function renderQuestion() {
     list.appendChild(btn);
   });
 
-  // replay buttons stop event
+  // Auto-read: câu hỏi → rồi đọc các đáp án nếu bật
   if (voiceCfg.autoRead) {
-    setTimeout(() => speakText(q.q, 'q-replay-btn'), 200);
+    setTimeout(() => speakSequence(q), 200);
   }
 }
 
@@ -1131,7 +1150,12 @@ function checkAnswer(chosen) {
 
   // read selected option
   if (voiceCfg.readOpt) {
-    speakText(isCorrect ? 'Đúng rồi, bé giỏi quá!' : 'Chưa đúng, đáp án là ' + q.opts[q.c]);
+    stopSpeaking();
+    setTimeout(() => {
+      speakText(isCorrect ? 'Đúng rồi, bé giỏi quá!' : 'Chưa đúng, đáp án là ' + q.opts[q.c]);
+    }, 100);
+  } else {
+    stopSpeaking();
   }
 
   setTimeout(() => {
@@ -1146,7 +1170,7 @@ function checkAnswer(chosen) {
 
 function replayQuestion() {
   const q = currentLesson.questions[currentQIdx];
-  if (q) speakText(q.q, 'q-replay-btn');
+  if (q) speakSequence(q, true); // force replay toàn bộ
 }
 
 function replayOption(event, idx) {
@@ -1190,35 +1214,94 @@ function showResult() {
 }
 
 /* ═══════════════════════════════════════════
-   TTS ENGINE
+   TTS ENGINE – Sequential Reader
 ═══════════════════════════════════════════ */
-function speakText(text, btnId) {
-  window.speechSynthesis.cancel();
 
+// Hàng đợi đọc tuần tự: [{text, btnId?}]
+let ttsQueue   = [];
+let ttsBusy    = false;
+let ttsAborted = false;
+
+function getSelectedVoice() {
+  if (voiceCfg.idx >= 0 && availableVoices[voiceCfg.idx]) return availableVoices[voiceCfg.idx];
+  return availableVoices.find(v => v.lang && v.lang.toLowerCase().startsWith('vi')) || null;
+}
+
+function buildUtterance(text, btnId) {
   const u = new SpeechSynthesisUtterance(text);
-  u.lang  = 'vi-VN';
-  u.rate  = parseFloat(voiceCfg.rate);
-  u.pitch = parseFloat(voiceCfg.pitch);
+  u.lang   = 'vi-VN';
+  u.rate   = parseFloat(voiceCfg.rate);
+  u.pitch  = parseFloat(voiceCfg.pitch);
   u.volume = parseFloat(voiceCfg.vol);
-
-  if (voiceCfg.idx >= 0 && availableVoices[voiceCfg.idx]) {
-    u.voice = availableVoices[voiceCfg.idx];
-  } else {
-    // auto pick Vietnamese voice
-    const vn = availableVoices.find(v => v.lang && v.lang.startsWith('vi'));
-    if (vn) u.voice = vn;
-  }
+  const v  = getSelectedVoice();
+  if (v) u.voice = v;
 
   if (btnId) {
     const btn = document.getElementById(btnId);
-    if (btn) {
-      btn.classList.add('speaking');
-      u.onend  = () => btn.classList.remove('speaking');
-      u.onerror = () => btn.classList.remove('speaking');
-    }
+    if (btn) btn.classList.add('speaking');
+    u.onend = u.onerror = () => {
+      if (btn) btn.classList.remove('speaking');
+    };
+  }
+  return u;
+}
+
+function ttsRunQueue() {
+  if (ttsBusy || ttsAborted || !ttsQueue.length) return;
+  ttsBusy = true;
+  const { text, btnId } = ttsQueue.shift();
+  const u = buildUtterance(text, btnId);
+  const origEnd   = u.onend;
+  const origError = u.onerror;
+  u.onend = (e) => { if (origEnd) origEnd(e); ttsBusy = false; if (!ttsAborted) ttsRunQueue(); };
+  u.onerror = (e) => { if (origError) origError(e); ttsBusy = false; if (!ttsAborted) ttsRunQueue(); };
+  window.speechSynthesis.speak(u);
+}
+
+// Đọc một đoạn đơn (hủy queue cũ)
+function speakText(text, btnId) {
+  ttsAborted = true;
+  window.speechSynthesis.cancel();
+  ttsQueue = [];
+  ttsBusy  = false;
+  setTimeout(() => {
+    ttsAborted = false;
+    ttsQueue = [{ text, btnId }];
+    ttsRunQueue();
+  }, 80);
+}
+
+// Đọc tuần tự: câu hỏi → "Một:" đáp án 1 → "Hai:" đáp án 2 → "Ba:" đáp án 3
+function speakSequence(q, forceOpts) {
+  ttsAborted = true;
+  window.speechSynthesis.cancel();
+  ttsQueue = [];
+  ttsBusy  = false;
+
+  const items = [{ text: q.q, btnId: 'q-replay-btn' }];
+
+  if (voiceCfg.readOptsAuto || forceOpts) {
+    const labels = ['Một', 'Hai', 'Ba'];
+    q.opts.forEach((opt, i) => {
+      items.push({ text: labels[i] + '. ' + opt, btnId: 'opt-replay-' + i });
+    });
   }
 
-  window.speechSynthesis.speak(u);
+  setTimeout(() => {
+    ttsAborted = false;
+    ttsQueue = items;
+    ttsRunQueue();
+  }, 80);
+}
+
+// Hủy toàn bộ đọc
+function stopSpeaking() {
+  ttsAborted = true;
+  window.speechSynthesis.cancel();
+  ttsQueue = [];
+  ttsBusy  = false;
+  // clear all speaking buttons
+  document.querySelectorAll('.speaking').forEach(b => b.classList.remove('speaking'));
 }
 
 /* ═══════════════════════════════════════════
@@ -1236,8 +1319,9 @@ function openSettings() {
   document.getElementById('rate-val').textContent  = voiceCfg.rate + '×';
   document.getElementById('pitch-val').textContent = voiceCfg.pitch;
   document.getElementById('vol-val').textContent   = voiceCfg.vol;
-  document.getElementById('toggle-autoread').className = 'toggle' + (voiceCfg.autoRead ? ' on' : '');
-  document.getElementById('toggle-readopt').className  = 'toggle' + (voiceCfg.readOpt  ? ' on' : '');
+  document.getElementById('toggle-autoread').className      = 'toggle' + (voiceCfg.autoRead    ? ' on' : '');
+  document.getElementById('toggle-readoptsauto').className  = 'toggle' + (voiceCfg.readOptsAuto? ' on' : '');
+  document.getElementById('toggle-readopt').className       = 'toggle' + (voiceCfg.readOpt     ? ' on' : '');
 }
 
 function closeSettings() {
@@ -1246,55 +1330,78 @@ function closeSettings() {
   document.getElementById('btn-settings').classList.remove('active');
 }
 
+/* ── Voice catalog ──
+   Hiển thị TẤT CẢ giọng có trên thiết bị, chia nhóm:
+   1. Tiếng Việt
+   2. Tiếng Anh (phổ biến, dùng được với TTS engine)
+   3. Các ngôn ngữ khác
+   Thứ tự: vi trước, en sau, còn lại cuối.
+*/
 function loadVoices() {
   availableVoices = window.speechSynthesis.getVoices();
   const list = document.getElementById('voice-list');
 
-  const viVoices = availableVoices.filter(v => v.lang && v.lang.toLowerCase().includes('vi'));
-  const otherViVoices = availableVoices.filter(v => !v.lang.toLowerCase().includes('vi')).slice(0, 10);
-  const display = viVoices.length > 0 ? viVoices : otherViVoices;
-
-  if (!display.length) {
-    list.innerHTML = '<div style="color:var(--gray);font-size:13px;">Không tìm thấy giọng tiếng Việt. Vui lòng cài thêm giọng trên thiết bị.</div>';
+  if (!availableVoices.length) {
+    list.innerHTML = '<div style="color:var(--gray);font-size:13px;padding:8px;">Đang tải danh sách giọng… Vui lòng thử lại sau vài giây.</div>';
     return;
   }
 
-  // remap idx
-  if (voiceCfg.idx >= 0) {
-    /* keep as-is */
-  } else {
-    const vn = availableVoices.findIndex(v => v.lang && v.lang.startsWith('vi'));
-    if (vn >= 0 && voiceCfg.idx < 0) voiceCfg.idx = vn;
+  // Auto-select first Vietnamese voice if none selected
+  if (voiceCfg.idx < 0 || !availableVoices[voiceCfg.idx]) {
+    const vn = availableVoices.findIndex(v => v.lang && v.lang.toLowerCase().startsWith('vi'));
+    if (vn >= 0) voiceCfg.idx = vn;
   }
 
+  // Sort: vi → en → others
+  const sorted = [...availableVoices].map((v, i) => ({ v, i })).sort((a, b) => {
+    const rank = v => v.lang.toLowerCase().startsWith('vi') ? 0 : v.lang.toLowerCase().startsWith('en') ? 1 : 2;
+    return rank(a.v) - rank(b.v);
+  });
+
+  // Group labels
+  const groupOf = lang => lang.toLowerCase().startsWith('vi') ? '🇻🇳 Tiếng Việt'
+                       : lang.toLowerCase().startsWith('en') ? '🌐 Tiếng Anh'
+                       : '🌍 Ngôn ngữ khác';
+
   list.innerHTML = '';
-  display.forEach(v => {
-    const realIdx = availableVoices.indexOf(v);
+  let lastGroup = null;
+
+  sorted.forEach(({ v, i }) => {
+    const grp = groupOf(v.lang);
+    if (grp !== lastGroup) {
+      const sep = document.createElement('div');
+      sep.style.cssText = 'font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.8px;color:var(--gray);padding:8px 0 4px;';
+      sep.textContent = grp;
+      list.appendChild(sep);
+      lastGroup = grp;
+    }
+
     const item = document.createElement('div');
-    item.className = 'voice-item' + (realIdx === voiceCfg.idx ? ' active' : '');
+    item.className = 'voice-item' + (i === voiceCfg.idx ? ' active' : '');
     item.innerHTML = `
-      <span class="vi">🎙️</span>
-      <div>
-        <div style="font-size:13px;font-weight:700;">${v.name}</div>
+      <span class="vi">${v.lang.toLowerCase().startsWith('vi') ? '🎙️' : v.lang.toLowerCase().startsWith('en') ? '🔤' : '🌍'}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${v.name}</div>
         <div style="font-size:11px;color:var(--gray);">${v.lang} ${v.localService ? '• Offline' : '• Online'}</div>
       </div>
       <div class="voice-dot"></div>`;
-    item.onclick = () => {
-      voiceCfg.idx = realIdx;
-      saveVoiceCfg();
-      loadVoices();
-    };
+    item.onclick = () => { voiceCfg.idx = i; saveVoiceCfg(); loadVoices(); };
     list.appendChild(item);
   });
 }
 
-function updateRate(v)  { voiceCfg.rate  = parseFloat(v); document.getElementById('rate-val').textContent  = v + '×'; saveVoiceCfg(); }
-function updatePitch(v) { voiceCfg.pitch = parseFloat(v); document.getElementById('pitch-val').textContent = v;        saveVoiceCfg(); }
-function updateVol(v)   { voiceCfg.vol   = parseFloat(v); document.getElementById('vol-val').textContent   = v;        saveVoiceCfg(); }
-function toggleAutoRead(el) { voiceCfg.autoRead = !voiceCfg.autoRead; el.className = 'toggle' + (voiceCfg.autoRead ? ' on' : ''); saveVoiceCfg(); }
-function toggleReadOpt(el)  { voiceCfg.readOpt  = !voiceCfg.readOpt;  el.className = 'toggle' + (voiceCfg.readOpt  ? ' on' : ''); saveVoiceCfg(); }
-function saveVoiceCfg()     { localStorage.setItem('mamnon_voice_v2', JSON.stringify(voiceCfg)); }
-function testVoice()        { speakText('Xin chào các bé! Đây là giọng đọc đang được chọn!'); }
+function updateRate(v)  { voiceCfg.rate  = parseFloat(v); document.getElementById('rate-val').textContent  = parseFloat(v).toFixed(1) + '×'; saveVoiceCfg(); }
+function updatePitch(v) { voiceCfg.pitch = parseFloat(v); document.getElementById('pitch-val').textContent = parseFloat(v).toFixed(1);        saveVoiceCfg(); }
+function updateVol(v)   { voiceCfg.vol   = parseFloat(v); document.getElementById('vol-val').textContent   = parseFloat(v).toFixed(1);        saveVoiceCfg(); }
+function toggleAutoRead(el)     { voiceCfg.autoRead     = !voiceCfg.autoRead;     el.className = 'toggle' + (voiceCfg.autoRead     ? ' on' : ''); saveVoiceCfg(); }
+function toggleReadOptsAuto(el) { voiceCfg.readOptsAuto = !voiceCfg.readOptsAuto; el.className = 'toggle' + (voiceCfg.readOptsAuto ? ' on' : ''); saveVoiceCfg(); }
+function toggleReadOpt(el)      { voiceCfg.readOpt      = !voiceCfg.readOpt;      el.className = 'toggle' + (voiceCfg.readOpt      ? ' on' : ''); saveVoiceCfg(); }
+function saveVoiceCfg()         { localStorage.setItem('mamnon_voice_v2', JSON.stringify(voiceCfg)); }
+function testVoice()            { speakText('Xin chào các bé! Đây là giọng đọc đang được chọn!'); }
+function testSequence() {
+  const sample = { q: 'Quả cam có vị gì?', opts: ['Ngọt chua mát', 'Cay sè xé lưỡi', 'Mặn chát'], c: 0 };
+  speakSequence(sample, true);
+}
 
 /* ═══════════════════════════════════════════
    ADMIN
@@ -1549,7 +1656,17 @@ function initVoices() {
   if (!availableVoices.length) {
     window.speechSynthesis.onvoiceschanged = () => {
       availableVoices = window.speechSynthesis.getVoices();
+      // auto-select Vietnamese if first run
+      if (voiceCfg.idx < 0) {
+        const vn = availableVoices.findIndex(v => v.lang && v.lang.toLowerCase().startsWith('vi'));
+        if (vn >= 0) { voiceCfg.idx = vn; saveVoiceCfg(); }
+      }
     };
+  } else {
+    if (voiceCfg.idx < 0) {
+      const vn = availableVoices.findIndex(v => v.lang && v.lang.toLowerCase().startsWith('vi'));
+      if (vn >= 0) { voiceCfg.idx = vn; saveVoiceCfg(); }
+    }
   }
 }
 
